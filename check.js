@@ -693,13 +693,127 @@ async function checkAvailability() {
     
     console.log('✅ Page loaded');
     
-    // Wait for SevenRooms iframe to load
+    // Wait for booking widget to load
+    await page.waitForTimeout(2000);
+    
+    // Click the date button to open calendar
+    console.log(`📅 Clicking date button to select date: ${DATE}`);
+    const [year, month, day] = DATE.split('-').map(Number);
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const monthName = monthNames[month - 1];
+    
+    // Try to find and click the date button
+    const dateButtonSelectors = [
+      '[data-test="sr-reservation-date"]',
+      'button[aria-label*="Date"]',
+      'button[aria-label*="date" i]',
+      '[data-testid*="date"]',
+      'button:has-text("Date")'
+    ];
+    
+    let dateButtonClicked = false;
+    for (const selector of dateButtonSelectors) {
+      try {
+        const dateButton = await page.locator(selector).first();
+        if (await dateButton.isVisible({ timeout: 3000 })) {
+          console.log(`   Found date button with selector: ${selector}`);
+          await dateButton.click();
+          dateButtonClicked = true;
+          console.log('✅ Clicked date button, waiting for calendar to open...');
+          await page.waitForTimeout(1500);
+          break;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    if (!dateButtonClicked) {
+      console.log('⚠️  Could not find date button, trying to continue...');
+    } else {
+      // Navigate to target month/year if needed
+      const currentMonth = new Date().getMonth() + 1;
+      const currentYear = new Date().getFullYear();
+      const monthsDiff = (year - currentYear) * 12 + (month - currentMonth);
+      
+      if (monthsDiff !== 0) {
+        console.log(`   Navigating ${monthsDiff > 0 ? 'forward' : 'back'} ${Math.abs(monthsDiff)} month(s)...`);
+        
+        const navSelectors = monthsDiff > 0 
+          ? ['button[aria-label*="next" i]', 'button[aria-label*="Next" i]', 'button:has-text(">")', 'button:has-text("›")']
+          : ['button[aria-label*="previous" i]', 'button[aria-label*="Previous" i]', 'button:has-text("<")', 'button:has-text("‹")'];
+        
+        for (const navSelector of navSelectors) {
+          try {
+            const navButton = await page.locator(navSelector).first();
+            if (await navButton.isVisible({ timeout: 2000 })) {
+              const clicks = Math.abs(monthsDiff);
+              for (let i = 0; i < clicks; i++) {
+                await navButton.click();
+                await page.waitForTimeout(600);
+              }
+              console.log(`✅ Navigated to ${monthName} ${year}`);
+              await page.waitForTimeout(1000);
+              break;
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+      }
+      
+      // Click on the target day
+      console.log(`   Clicking on day ${day}...`);
+      const daySelectors = [
+        `button:has-text("${day}")`,
+        `[aria-label*="${day}" i]`,
+        `[data-date*="${DATE}"]`,
+        `button[data-date*="${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}"]`
+      ];
+      
+      let dayClicked = false;
+      for (const selector of daySelectors) {
+        try {
+          const dayButton = await page.locator(selector).first();
+          if (await dayButton.isVisible({ timeout: 2000 })) {
+            await dayButton.click();
+            dayClicked = true;
+            console.log(`✅ Selected date ${DATE}`);
+            await page.waitForTimeout(2000); // Wait for calendar to close and page to update
+            break;
+          }
+        } catch (error) {
+          continue;
+        }
+      }
+      
+      if (!dayClicked) {
+        console.log(`⚠️  Could not click day ${day}, trying alternative approach...`);
+        // Try clicking any button with just the day number
+        try {
+          const allDayButtons = await page.locator('button, [role="gridcell"], [role="button"]').all();
+          for (const btn of allDayButtons) {
+            const text = await btn.textContent();
+            if (text && text.trim() === day.toString()) {
+              await btn.click();
+              console.log(`✅ Clicked day ${day} via text match`);
+              await page.waitForTimeout(2000);
+              break;
+            }
+          }
+        } catch (error) {
+          console.log(`⚠️  Could not select date automatically`);
+        }
+      }
+    }
+    
+    // Wait for SevenRooms iframe to load (if present)
     console.log('⏳ Waiting for SevenRooms iframe to load...');
     
     let iframe = null;
     try {
       const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
-        timeout: 15000
+        timeout: 10000
       });
       if (iframeElement) {
         iframe = await iframeElement.contentFrame();
