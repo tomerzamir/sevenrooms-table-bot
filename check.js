@@ -138,36 +138,59 @@ async function selectDate(page, targetDate) {
     // Parse the target date (format: YYYY-MM-DD)
     const [year, month, day] = targetDate.split('-').map(Number);
     const targetDateObj = new Date(year, month - 1, day);
+    const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+    const monthName = monthNames[month - 1];
     
-    // Try various date picker selectors
-    const dateInputSelectors = [
+    // Wait a bit for the widget to fully load
+    await page.waitForTimeout(1000);
+    
+    // Try various date picker selectors - clickable date fields
+    const dateFieldSelectors = [
       'input[type="date"]',
       'input[placeholder*="date" i]',
       'input[name*="date" i]',
       '[data-testid*="date"]',
-      '[class*="date-picker"]',
-      '[class*="calendar"]',
-      'button[aria-label*="date" i]'
+      '[class*="date"]',
+      '[class*="Date"]',
+      'button[aria-label*="date" i]',
+      'div[role="button"][aria-label*="date" i]',
+      '[id*="date"]',
+      'input[readonly]', // SevenRooms often uses readonly inputs
+      'div:has-text("Date")',
+      'label:has-text("Date")'
     ];
     
     let dateSelected = false;
     
-    // First, try to find a date input and set it directly
-    for (const selector of dateInputSelectors) {
+    // First, try to find and click the date field to open calendar
+    for (const selector of dateFieldSelectors) {
       try {
-        const dateInput = await page.locator(selector).first();
-        if (await dateInput.isVisible({ timeout: 2000 })) {
-          console.log(`   Found date input with selector: ${selector}`);
-          // Try to set the date directly if it's an input
-          const tagName = await dateInput.evaluate(el => el.tagName.toLowerCase());
+        const dateField = await page.locator(selector).first();
+        if (await dateField.isVisible({ timeout: 2000 })) {
+          console.log(`   Found date field with selector: ${selector}`);
+          
+          const tagName = await dateField.evaluate(el => el.tagName.toLowerCase());
+          
+          // If it's an input, try to fill it directly first
           if (tagName === 'input') {
-            await dateInput.fill(targetDate);
-            await dateInput.press('Enter');
-            dateSelected = true;
-            console.log(`✅ Set date input to ${targetDate}`);
-            await page.waitForTimeout(1000);
-            break;
+            try {
+              await dateField.fill(targetDate);
+              await dateField.press('Enter');
+              await page.waitForTimeout(1000);
+              dateSelected = true;
+              console.log(`✅ Set date input to ${targetDate}`);
+              break;
+            } catch (error) {
+              // If that fails, try clicking to open calendar
+              console.log(`   Input fill failed, trying to click to open calendar...`);
+            }
           }
+          
+          // Click to open calendar
+          await dateField.click();
+          await page.waitForTimeout(1500); // Wait for calendar to open
+          console.log(`   Clicked date field, calendar should be open`);
+          break;
         }
       } catch (error) {
         continue;
@@ -178,51 +201,131 @@ async function selectDate(page, targetDate) {
     if (!dateSelected) {
       console.log('   Trying calendar date selection...');
       
-      // Look for calendar/date picker elements
+      // First, check current month/year displayed and navigate if needed
+      const pageText = await page.textContent('body');
+      console.log(`   Current calendar context: ${pageText.substring(0, 200)}...`);
+      
+      // Try to navigate to the correct month/year first
+      const currentMonth = new Date().getMonth() + 1;
+      const currentYear = new Date().getFullYear();
+      const monthsDiff = (year - currentYear) * 12 + (month - currentMonth);
+      
+      if (monthsDiff !== 0) {
+        console.log(`   Need to navigate ${monthsDiff > 0 ? 'forward' : 'back'} ${Math.abs(monthsDiff)} month(s)`);
+        
+        const navSelectors = [
+          'button[aria-label*="next" i]',
+          'button[aria-label*="Next" i]',
+          'button[aria-label*="forward" i]',
+          'button[aria-label*=">" i]',
+          '[class*="next"]',
+          '[class*="Next"]',
+          'button:has-text(">")',
+          'button:has-text("›")',
+          'button:has-text("→")'
+        ];
+        
+        const prevSelectors = [
+          'button[aria-label*="previous" i]',
+          'button[aria-label*="Previous" i]',
+          'button[aria-label*="back" i]',
+          'button[aria-label*="<" i]',
+          '[class*="prev"]',
+          '[class*="Prev"]',
+          'button:has-text("<")',
+          'button:has-text("‹")',
+          'button:has-text("←")'
+        ];
+        
+        const navButtons = monthsDiff > 0 ? navSelectors : prevSelectors;
+        
+        for (const navSelector of navButtons) {
+          try {
+            const navButton = await page.locator(navSelector).first();
+            if (await navButton.isVisible({ timeout: 2000 })) {
+              const clicks = Math.abs(monthsDiff);
+              for (let i = 0; i < clicks; i++) {
+                await navButton.click();
+                await page.waitForTimeout(800); // Wait for calendar to update
+              }
+              console.log(`   ✅ Navigated ${clicks} month(s)`);
+              await page.waitForTimeout(1000);
+              break;
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+      }
+      
+      // Now try to find and click the day
       const calendarSelectors = [
+        `button:has-text("${day}")`,
+        `[aria-label*="${day}" i]`,
+        `[data-date*="${targetDate}"]`,
+        `[data-date*="${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}"]`,
         '[role="gridcell"]',
         '[class*="calendar-day"]',
         '[class*="date-cell"]',
         'td[data-date]',
         'button[data-date]',
-        '[aria-label*="day"]'
+        '[aria-label*="day" i]',
+        'div[role="button"]'
       ];
       
       for (const selector of calendarSelectors) {
         try {
-          // Get all date elements
           const dateElements = await page.locator(selector).all();
+          console.log(`   Found ${dateElements.length} elements with selector: ${selector}`);
           
           for (const element of dateElements) {
             const text = await element.textContent();
             const ariaLabel = await element.getAttribute('aria-label') || '';
             const dataDate = await element.getAttribute('data-date') || '';
+            const isDisabled = await element.getAttribute('disabled') || await element.getAttribute('aria-disabled') === 'true';
+            
+            if (isDisabled) continue;
             
             // Check if this element matches our target date
-            const elementDate = dataDate || ariaLabel || text;
+            const elementDate = dataDate || ariaLabel || text || '';
             
-            // Try to match the day number
-            if (elementDate.includes(day.toString()) || text?.trim() === day.toString()) {
-              // Verify it's the right month/year by checking parent context
+            // Try to match the day number - be more flexible
+            const dayMatch = text?.trim() === day.toString() || 
+                           text?.trim() === `0${day}` ||
+                           elementDate.includes(day.toString());
+            
+            if (dayMatch) {
+              // Check if it's in the right month context
               const parentText = await element.evaluate(el => {
                 let parent = el.parentElement;
                 let attempts = 0;
-                while (parent && attempts < 5) {
+                let fullContext = '';
+                while (parent && attempts < 10) {
                   const text = parent.textContent || '';
-                  if (text.includes(month.toString()) || text.includes(year.toString())) {
-                    return text;
-                  }
+                  fullContext += text + ' ';
                   parent = parent.parentElement;
                   attempts++;
                 }
-                return '';
+                return fullContext;
               });
               
-              // If we found a matching day, click it
-              if (parentText.includes(month.toString()) || parentText.includes(year.toString()) || !parentText) {
+              // Check if parent context mentions the month/year
+              const hasMonth = parentText.includes(monthName) || 
+                              parentText.includes(month.toString()) ||
+                              parentText.includes(monthNames[month - 1].substring(0, 3));
+              
+              // If data-date attribute exists and matches, that's definitive
+              if (dataDate && dataDate.includes(targetDate)) {
                 await element.click();
                 dateSelected = true;
-                console.log(`✅ Clicked date ${day} in calendar`);
+                console.log(`✅ Clicked date ${day} (matched by data-date: ${dataDate})`);
+                await page.waitForTimeout(2000);
+                break;
+              } else if (hasMonth || !parentText) {
+                // Try clicking if month matches or if we can't determine context
+                await element.click();
+                dateSelected = true;
+                console.log(`✅ Clicked date ${day} (matched by text: ${text})`);
                 await page.waitForTimeout(2000);
                 break;
               }
@@ -236,60 +339,9 @@ async function selectDate(page, targetDate) {
       }
     }
     
-    // If still not selected, try navigating calendar months
-    if (!dateSelected) {
-      console.log('   Trying to navigate calendar to target month...');
-      
-      // Try to find next/previous month buttons
-      const navSelectors = [
-        'button[aria-label*="next" i]',
-        'button[aria-label*="previous" i]',
-        'button[aria-label*="forward" i]',
-        'button[aria-label*="back" i]',
-        '[class*="next"]',
-        '[class*="prev"]'
-      ];
-      
-      // Get current month/year from calendar if visible
-      const calendarText = await page.textContent('body');
-      const currentMonth = new Date().getMonth() + 1;
-      const currentYear = new Date().getFullYear();
-      
-      // Calculate how many months to navigate
-      const monthsDiff = (year - currentYear) * 12 + (month - currentMonth);
-      
-      if (monthsDiff !== 0) {
-        const navButton = monthsDiff > 0 
-          ? await page.locator('button[aria-label*="next" i], button[aria-label*="forward" i]').first()
-          : await page.locator('button[aria-label*="previous" i], button[aria-label*="back" i]').first();
-        
-        if (await navButton.isVisible({ timeout: 2000 })) {
-          const clicks = Math.abs(monthsDiff);
-          for (let i = 0; i < clicks; i++) {
-            await navButton.click();
-            await page.waitForTimeout(500);
-          }
-          console.log(`   Navigated ${clicks} month(s)`);
-          
-          // Now try to click the day
-          const dayElements = await page.locator('[role="gridcell"], [class*="calendar-day"], button[data-date]').all();
-          for (const element of dayElements) {
-            const text = await element.textContent();
-            if (text?.trim() === day.toString()) {
-              await element.click();
-              dateSelected = true;
-              console.log(`✅ Clicked date ${day} after navigation`);
-              await page.waitForTimeout(2000);
-              break;
-            }
-          }
-          return;
-        }
-      }
-    }
-    
     if (!dateSelected) {
       console.log('⚠️  Could not select date automatically, continuing...');
+      console.log('   The script will continue but may not find availability for the selected date');
     }
   } catch (error) {
     console.log(`⚠️  Error selecting date: ${error.message}`);
@@ -301,19 +353,34 @@ async function selectPartySize(page, partySize) {
   try {
     const partySizeNum = parseInt(partySize, 10);
     
-    // Try various party size selectors
+    // Wait a bit for widget to be ready
+    await page.waitForTimeout(500);
+    
+    // Try various party size selectors - be more comprehensive
     const partySelectors = [
       `select[name*="party" i]`,
       `select[name*="guest" i]`,
       `select[name*="people" i]`,
+      `select[name*="guests" i]`,
       `input[name*="party" i]`,
       `input[name*="guest" i]`,
       `input[name*="people" i]`,
+      `input[name*="guests" i]`,
+      `input[type="number"]`,
       `[data-testid*="party"]`,
       `[data-testid*="guest"]`,
+      `[id*="party"]`,
+      `[id*="guest"]`,
+      `[class*="party"]`,
+      `[class*="guest"]`,
+      `[class*="Guest"]`,
       `button:has-text("${partySize}")`,
       `[aria-label*="party" i]`,
-      `[aria-label*="guest" i]`
+      `[aria-label*="guest" i]`,
+      `[aria-label*="Guests" i]`,
+      `label:has-text("Guest")`,
+      `label:has-text("guests")`,
+      `div:has-text("Guests")`
     ];
     
     let partySizeSelected = false;
@@ -328,24 +395,66 @@ async function selectPartySize(page, partySize) {
           const tagName = await element.evaluate(el => el.tagName.toLowerCase());
           
           if (tagName === 'select') {
-            await element.selectOption(partySizeNum.toString());
-            partySizeSelected = true;
-            console.log(`✅ Selected party size ${partySize} from dropdown`);
-            await page.waitForTimeout(1000);
-            break;
+            try {
+              await element.selectOption(partySizeNum.toString());
+              partySizeSelected = true;
+              console.log(`✅ Selected party size ${partySize} from dropdown`);
+              await page.waitForTimeout(1000);
+              break;
+            } catch (error) {
+              console.log(`   Select option failed: ${error.message}`);
+              continue;
+            }
           } else if (tagName === 'input') {
-            await element.fill(partySizeNum.toString());
-            await element.press('Enter');
-            partySizeSelected = true;
-            console.log(`✅ Set party size input to ${partySize}`);
-            await page.waitForTimeout(1000);
-            break;
-          } else if (tagName === 'button') {
-            await element.click();
-            partySizeSelected = true;
-            console.log(`✅ Clicked party size button for ${partySize}`);
-            await page.waitForTimeout(1000);
-            break;
+            try {
+              // Clear first, then fill
+              await element.click();
+              await element.fill('');
+              await element.fill(partySizeNum.toString());
+              await element.press('Enter');
+              await page.waitForTimeout(500);
+              
+              // Verify it was set
+              const value = await element.inputValue();
+              if (value === partySizeNum.toString()) {
+                partySizeSelected = true;
+                console.log(`✅ Set party size input to ${partySize}`);
+                await page.waitForTimeout(1000);
+                break;
+              }
+            } catch (error) {
+              console.log(`   Input fill failed: ${error.message}`);
+              continue;
+            }
+          } else if (tagName === 'button' || tagName === 'div') {
+            // For buttons/divs, try clicking
+            try {
+              await element.click();
+              partySizeSelected = true;
+              console.log(`✅ Clicked party size element for ${partySize}`);
+              await page.waitForTimeout(1000);
+              break;
+            } catch (error) {
+              continue;
+            }
+          } else if (tagName === 'label') {
+            // If it's a label, try to find associated input
+            try {
+              const forAttr = await element.getAttribute('for');
+              if (forAttr) {
+                const input = await page.locator(`#${forAttr}`).first();
+                if (await input.isVisible({ timeout: 1000 })) {
+                  await input.fill(partySizeNum.toString());
+                  await input.press('Enter');
+                  partySizeSelected = true;
+                  console.log(`✅ Set party size via label to ${partySize}`);
+                  await page.waitForTimeout(1000);
+                  break;
+                }
+              }
+            } catch (error) {
+              continue;
+            }
           }
         }
       } catch (error) {
@@ -355,40 +464,108 @@ async function selectPartySize(page, partySize) {
     
     // If not found, try increment/decrement buttons
     if (!partySizeSelected) {
+      console.log('   Trying increment/decrement buttons...');
       try {
-        const incrementButtons = await page.locator('button[aria-label*="increase" i], button[aria-label*="increment" i], button[aria-label*="+" i]').all();
-        const decrementButtons = await page.locator('button[aria-label*="decrease" i], button[aria-label*="decrement" i], button[aria-label*="-" i]').all();
+        const incrementSelectors = [
+          'button[aria-label*="increase" i]',
+          'button[aria-label*="increment" i]',
+          'button[aria-label*="+" i]',
+          'button:has-text("+")',
+          '[class*="increment"]',
+          '[class*="increase"]'
+        ];
         
-        if (incrementButtons.length > 0 || decrementButtons.length > 0) {
-          // Try to find current party size value
-          const currentValueElement = await page.locator('input[type="number"], [class*="party"], [class*="guest"]').first();
-          if (await currentValueElement.isVisible({ timeout: 2000 })) {
-            const currentValue = parseInt(await currentValueElement.inputValue() || await currentValueElement.textContent() || '1', 10);
-            const diff = partySizeNum - currentValue;
-            
-            if (diff !== 0) {
-              const buttons = diff > 0 ? incrementButtons : decrementButtons;
-              if (buttons.length > 0) {
-                for (let i = 0; i < Math.abs(diff); i++) {
-                  await buttons[0].click();
-                  await page.waitForTimeout(300);
-                }
-                partySizeSelected = true;
-                console.log(`✅ Adjusted party size to ${partySize} using buttons`);
-              }
-            } else {
-              partySizeSelected = true;
-              console.log(`✅ Party size already set to ${partySize}`);
+        const decrementSelectors = [
+          'button[aria-label*="decrease" i]',
+          'button[aria-label*="decrement" i]',
+          'button[aria-label*="-" i]',
+          'button:has-text("-")',
+          '[class*="decrement"]',
+          '[class*="decrease"]'
+        ];
+        
+        let incrementButton = null;
+        let decrementButton = null;
+        
+        for (const selector of incrementSelectors) {
+          try {
+            const btn = await page.locator(selector).first();
+            if (await btn.isVisible({ timeout: 1000 })) {
+              incrementButton = btn;
+              break;
             }
+          } catch (error) {
+            continue;
+          }
+        }
+        
+        for (const selector of decrementSelectors) {
+          try {
+            const btn = await page.locator(selector).first();
+            if (await btn.isVisible({ timeout: 1000 })) {
+              decrementButton = btn;
+              break;
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+        
+        if (incrementButton || decrementButton) {
+          // Try to find current party size value
+          const valueSelectors = [
+            'input[type="number"]',
+            '[class*="party"]',
+            '[class*="guest"]',
+            '[class*="value"]',
+            '[data-value]'
+          ];
+          
+          let currentValue = 1;
+          for (const selector of valueSelectors) {
+            try {
+              const valueElement = await page.locator(selector).first();
+              if (await valueElement.isVisible({ timeout: 1000 })) {
+                const tagName = await valueElement.evaluate(el => el.tagName.toLowerCase());
+                if (tagName === 'input') {
+                  currentValue = parseInt(await valueElement.inputValue() || '1', 10);
+                } else {
+                  currentValue = parseInt(await valueElement.textContent() || '1', 10);
+                }
+                console.log(`   Current party size: ${currentValue}`);
+                break;
+              }
+            } catch (error) {
+              continue;
+            }
+          }
+          
+          const diff = partySizeNum - currentValue;
+          
+          if (diff !== 0) {
+            const button = diff > 0 ? incrementButton : decrementButton;
+            if (button) {
+              const clicks = Math.abs(diff);
+              for (let i = 0; i < clicks; i++) {
+                await button.click();
+                await page.waitForTimeout(400);
+              }
+              partySizeSelected = true;
+              console.log(`✅ Adjusted party size to ${partySize} using ${diff > 0 ? 'increment' : 'decrement'} buttons`);
+            }
+          } else {
+            partySizeSelected = true;
+            console.log(`✅ Party size already set to ${partySize}`);
           }
         }
       } catch (error) {
-        // Ignore errors
+        console.log(`   Button adjustment failed: ${error.message}`);
       }
     }
     
     if (!partySizeSelected) {
       console.log('⚠️  Could not select party size automatically, continuing...');
+      console.log('   The script will continue but may not find correct availability');
     }
   } catch (error) {
     console.log(`⚠️  Error selecting party size: ${error.message}`);
