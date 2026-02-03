@@ -430,10 +430,13 @@ async function checkAvailability() {
             console.log(`📡 Found potential reservation data from: ${url}`);
             
             // Try to extract times from various possible structures
-            const times = extractTimesFromJson(json);
+            // Filter to only include times for the selected date
+            const times = extractTimesFromJson(json, DATE);
             if (times.length > 0) {
-              console.log(`   Found ${times.length} time slots`);
+              console.log(`   Found ${times.length} time slots for selected date`);
               availableTimes.push(...times);
+            } else {
+              console.log(`   Found reservation data but no times match selected date ${DATE}`);
             }
           }
         }
@@ -527,6 +530,18 @@ async function checkAvailability() {
     // Wait a bit more for any async API calls after date and party size selection
     await page.waitForTimeout(3000);
     
+    // Check for "no availability" message for the selected date
+    console.log('🔍 Checking for availability status...');
+    const hasNoAvailability = await checkNoAvailability(contextPage);
+    
+    if (hasNoAvailability) {
+      console.log('❌ No availability found for selected date');
+      console.log('   Skipping time extraction to avoid false positives');
+      // Still check network responses in case they contain date-specific data
+    } else {
+      console.log('✅ Availability check passed (or message not found)');
+    }
+    
     console.log(`\n📊 Network activity summary:`);
     console.log(`   Total endpoints checked: ${seenEndpoints.length}`);
     if (seenEndpoints.length > 0) {
@@ -545,13 +560,16 @@ async function checkAvailability() {
     }
     
     // If we didn't find times via network interception, try DOM parsing
-    if (availableTimes.length === 0) {
+    // Only if we didn't detect a "no availability" message
+    if (availableTimes.length === 0 && !hasNoAvailability) {
       console.log('\n🔍 Attempting to extract times from DOM...');
-      const domTimes = await extractTimesFromDOM(contextPage);
+      const domTimes = await extractTimesFromDOM(contextPage, DATE);
       if (domTimes.length > 0) {
         availableTimes.push(...domTimes);
         console.log(`   Found ${domTimes.length} times in DOM`);
       }
+    } else if (hasNoAvailability) {
+      console.log('\n⏭️  Skipping DOM extraction due to no availability message');
     }
     
     // Process available times
@@ -605,11 +623,32 @@ async function checkAvailability() {
 }
 
 // Extract times from JSON response (handles various structures)
-function extractTimesFromJson(json, times = []) {
+// Filters to only include times for the selected date
+function extractTimesFromJson(json, selectedDate, times = [], parentDateMatches = false) {
   if (typeof json !== 'object' || json === null) return times;
+  
+  // Parse selected date for comparison
+  const [year, month, day] = selectedDate.split('-').map(Number);
+  const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+  const dateStrAlt = `${month}/${day}/${year}`;
+  const dateStrAlt2 = `${day}/${month}/${year}`;
   
   // Check common field names
   const timeFields = ['time', 'startTime', 'start_time', 'slot', 'availability', 'reservationTime'];
+  const dateFields = ['date', 'bookingDate', 'reservationDate', 'day', 'selectedDate'];
+  
+  // Check if this object has a date field that matches
+  let dateMatches = parentDateMatches;
+  for (const [key, value] of Object.entries(json)) {
+    const lowerKey = key.toLowerCase();
+    if (dateFields.some(field => lowerKey.includes(field))) {
+      const valueStr = String(value);
+      if (valueStr.includes(dateStr) || valueStr.includes(dateStrAlt) || valueStr.includes(dateStrAlt2)) {
+        dateMatches = true;
+        break;
+      }
+    }
+  }
   
   for (const [key, value] of Object.entries(json)) {
     const lowerKey = key.toLowerCase();
@@ -617,7 +656,10 @@ function extractTimesFromJson(json, times = []) {
     // If this looks like a time field
     if (timeFields.some(field => lowerKey.includes(field))) {
       if (typeof value === 'string' && value.match(/\d{1,2}:\d{2}/)) {
-        times.push(value);
+        // Only add if date matches (be conservative - don't add if unsure)
+        if (dateMatches) {
+          times.push(value);
+        }
       }
     }
     
@@ -625,52 +667,147 @@ function extractTimesFromJson(json, times = []) {
     if (Array.isArray(value)) {
       value.forEach(item => {
         if (typeof item === 'object') {
-          extractTimesFromJson(item, times);
+          extractTimesFromJson(item, selectedDate, times, dateMatches);
         } else if (typeof item === 'string' && item.match(/\d{1,2}:\d{2}/)) {
-          times.push(item);
+          // For array items, only add if date matches
+          if (dateMatches) {
+            times.push(item);
+          }
         }
       });
     }
     
     // Recursively check nested objects
-    if (typeof value === 'object' && value !== null) {
-      extractTimesFromJson(value, times);
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+      extractTimesFromJson(value, selectedDate, times, dateMatches);
     }
   }
   
   return times;
 }
 
-// Extract times from DOM as fallback
-async function extractTimesFromDOM(page) {
+// Check if there's a "no availability" message for the selected date
+async function checkNoAvailability(page) {
+  try {
+    const noAvailabilitySelectors = [
+      ':has-text("no availability")',
+      ':has-text("Unfortunately there is no availability")',
+      ':has-text("no availability at the selected time")',
+      '[class*="no-availability"]',
+      '[class*="unavailable"]'
+    ];
+    
+    for (const selector of noAvailabilitySelectors) {
+      try {
+        const element = await page.locator(selector).first();
+        if (await element.isVisible({ timeout: 1000 })) {
+          const text = await element.textContent();
+          // Make sure it's about the selected date, not other dates
+          if (text && !text.toLowerCase().includes('other dates')) {
+            return true;
+          }
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    return false;
+  } catch (error) {
+    return false;
+  }
+}
+
+// Extract times from DOM as fallback - only for selected date
+async function extractTimesFromDOM(page, selectedDate) {
   const times = [];
   
   try {
+    // Parse selected date to match against
+    const [year, month, day] = selectedDate.split('-').map(Number);
+    const dateStr = `${day} ${getMonthName(month)}`;
+    const dateStrAlt = `${month}/${day}`;
+    
+    // First, try to find the section that shows times for the selected date
+    // Look for time slots that are NOT in "Other dates" sections
+    const pageText = await page.textContent('body');
+    
+    // Check if there's an "Other dates" section - if so, exclude times from there
+    const otherDatesMatch = pageText.match(/other dates with availability/i);
+    const otherDatesIndex = otherDatesMatch ? pageText.indexOf(otherDatesMatch[0]) : -1;
+    
     // Look for common time selectors
     const selectors = [
       '[data-time]',
-      '[class*="time"]',
-      '[class*="slot"]',
-      '[class*="availability"]',
+      '[class*="time-slot"]',
+      '[class*="available-time"]',
       'button[aria-label*="time"]',
-      '.time-slot',
-      '.available-time'
+      '[class*="slot"]:not([class*="other"])',
+      '[class*="availability"]:not([class*="other"])'
     ];
     
     for (const selector of selectors) {
-      const elements = await page.$$(selector);
-      for (const element of elements) {
-        const text = await element.textContent();
-        if (text && text.match(/\d{1,2}:\d{2}/)) {
-          times.push(text.trim());
+      try {
+        const elements = await page.locator(selector).all();
+        for (const element of elements) {
+          // Get the element's position and context
+          const elementText = await element.textContent();
+          const elementIndex = pageText.indexOf(elementText || '');
+          
+          // Skip if this element is in the "Other dates" section
+          if (otherDatesIndex !== -1 && elementIndex > otherDatesIndex) {
+            continue;
+          }
+          
+          // Check if this time slot is associated with the selected date
+          // Look at parent elements for date context
+          const parentContext = await element.evaluate(el => {
+            let parent = el.parentElement;
+            let context = '';
+            let attempts = 0;
+            while (parent && attempts < 5) {
+              context = parent.textContent || '';
+              if (context.includes('Feb') || context.includes('date') || context.includes('Feb')) {
+                return context;
+              }
+              parent = parent.parentElement;
+              attempts++;
+            }
+            return '';
+          });
+          
+          // If parent context mentions "other dates", skip
+          if (parentContext.toLowerCase().includes('other dates')) {
+            continue;
+          }
+          
+          // Extract time if it matches the pattern
+          if (elementText && elementText.match(/\d{1,2}:\d{2}/)) {
+            const timeMatch = elementText.match(/(\d{1,2}:\d{2})/);
+            if (timeMatch) {
+              times.push(timeMatch[1]);
+            }
+          }
         }
+      } catch (error) {
+        continue;
       }
     }
+    
+    // Also check network responses for date-specific availability
+    // This will be handled by the network interception above
+    
   } catch (error) {
     console.log(`   ⚠️  DOM extraction error: ${error.message}`);
   }
   
   return times;
+}
+
+// Helper function to get month name
+function getMonthName(monthNum) {
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return months[monthNum - 1] || '';
 }
 
 // Run the check
