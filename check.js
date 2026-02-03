@@ -572,8 +572,8 @@ async function selectPartySize(page, partySize) {
   }
 }
 
-// Extract times recursively from data structure
-function extractTimes(data, times = new Set(), visited = new WeakSet()) {
+// Extract times recursively from data structure, optionally filtered by date
+function extractTimes(data, times = new Set(), visited = new WeakSet(), filterDate = null) {
   if (data === null || data === undefined) return times;
   
   // Avoid circular references (only for objects)
@@ -634,6 +634,23 @@ function extractTimes(data, times = new Set(), visited = new WeakSet()) {
   return times;
 }
 
+// Check if a JSON response contains times for the selected date
+function hasTimesForDate(json, selectedDate) {
+  if (!json || typeof json !== 'object') return false;
+  
+  const jsonStr = JSON.stringify(json).toLowerCase();
+  const [year, month, day] = selectedDate.split('-').map(Number);
+  const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+  const dateStrAlt = `${month}/${day}/${year}`;
+  const dateStrAlt2 = `${day}/${month}/${year}`;
+  
+  // Check if the JSON contains the selected date
+  return jsonStr.includes(dateStr) || 
+         jsonStr.includes(dateStrAlt) || 
+         jsonStr.includes(dateStrAlt2) ||
+         jsonStr.includes(`${day} ${['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'][month - 1]}`);
+}
+
 // Main checking function
 async function checkAvailability() {
   const state = loadState();
@@ -667,8 +684,11 @@ async function checkAvailability() {
           const json = await response.json().catch(() => null);
           if (json) {
             jsonResponses.push({ url, data: json });
-            const times = extractTimes(json);
-            times.forEach(time => allExtractedTimes.add(time));
+            // Only extract times if this response is for the selected date
+            if (hasTimesForDate(json, DATE)) {
+              const times = extractTimes(json);
+              times.forEach(time => allExtractedTimes.add(time));
+            }
           }
         }
       } catch (error) {
@@ -739,26 +759,48 @@ async function checkAvailability() {
     const [year, month, day] = DATE.split('-').map(Number);
     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const monthName = monthNames[month - 1];
+    const monthNameShort = monthName.substring(0, 3); // "Feb"
     
-    // Try to find and click the date button
+    // Try to find and click the date button - try both main page and iframe
     const dateButtonSelectors = [
       '[data-test="sr-reservation-date"]',
+      'button[data-test="sr-reservation-date"]',
       'button[aria-label*="Date"]',
       'button[aria-label*="date" i]',
       '[data-testid*="date"]',
-      'button:has-text("Date")'
+      'button:has-text("Date")',
+      'button[class*="date"]',
+      '[role="button"][aria-label*="date" i]'
     ];
     
     let dateButtonClicked = false;
+    let targetPage = page; // Will be set to iframe if found
+    
+    // First try to find iframe and use it
+    try {
+      const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
+        timeout: 5000
+      });
+      if (iframeElement) {
+        const iframe = await iframeElement.contentFrame();
+        if (iframe) {
+          targetPage = iframe;
+          console.log('   Using iframe context for date selection');
+        }
+      }
+    } catch (error) {
+      // Continue with main page
+    }
+    
     for (const selector of dateButtonSelectors) {
       try {
-        const dateButton = await page.locator(selector).first();
+        const dateButton = await targetPage.locator(selector).first();
         if (await dateButton.isVisible({ timeout: 3000 })) {
           console.log(`   Found date button with selector: ${selector}`);
           await dateButton.click();
           dateButtonClicked = true;
           console.log('✅ Clicked date button, waiting for calendar to open...');
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(2000);
           break;
         }
       } catch (error) {
@@ -767,8 +809,27 @@ async function checkAvailability() {
     }
     
     if (!dateButtonClicked) {
-      console.log('⚠️  Could not find date button, trying to continue...');
-    } else {
+      console.log('⚠️  Could not find date button, trying alternative approach...');
+      // Try clicking any button that contains date-like text
+      try {
+        const allButtons = await targetPage.locator('button').all();
+        for (const btn of allButtons) {
+          const ariaLabel = await btn.getAttribute('aria-label') || '';
+          const text = await btn.textContent() || '';
+          if (ariaLabel.toLowerCase().includes('date') || text.toLowerCase().includes('date') || text.match(/\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i)) {
+            await btn.click();
+            dateButtonClicked = true;
+            console.log('✅ Clicked date button via text match');
+            await page.waitForTimeout(2000);
+            break;
+          }
+        }
+      } catch (error) {
+        console.log('⚠️  Could not find date button, trying to continue...');
+      }
+    }
+    
+    if (dateButtonClicked) {
       // Navigate to target month/year if needed
       const currentMonth = new Date().getMonth() + 1;
       const currentYear = new Date().getFullYear();
@@ -803,6 +864,10 @@ async function checkAvailability() {
       // Click on the target day
       console.log(`   Clicking on day ${day}...`);
       const daySelectors = [
+        `button[aria-label*="Date ${day} ${monthNameShort}" i]`,
+        `button[aria-label*="Date ${day} ${monthName}" i]`,
+        `button[aria-label*="${day} ${monthNameShort}" i]`,
+        `button[aria-label*="${day} ${monthName}" i]`,
         `button:has-text("${day}")`,
         `[aria-label*="${day}" i]`,
         `[data-date*="${DATE}"]`,
@@ -812,13 +877,18 @@ async function checkAvailability() {
       let dayClicked = false;
       for (const selector of daySelectors) {
         try {
-          const dayButton = await page.locator(selector).first();
+          const dayButton = await targetPage.locator(selector).first();
           if (await dayButton.isVisible({ timeout: 2000 })) {
-            await dayButton.click();
-            dayClicked = true;
-            console.log(`✅ Selected date ${DATE}`);
-            await page.waitForTimeout(2000); // Wait for calendar to close and page to update
-            break;
+            const ariaLabel = await dayButton.getAttribute('aria-label') || '';
+            const text = await dayButton.textContent() || '';
+            // Verify it's the right day
+            if (ariaLabel.includes(day.toString()) || text.trim() === day.toString() || text.includes(`${day} ${monthNameShort}`)) {
+              await dayButton.click();
+              dayClicked = true;
+              console.log(`✅ Selected date ${DATE} (${ariaLabel || text})`);
+              await page.waitForTimeout(3000); // Wait for calendar to close and page to update
+              break;
+            }
           }
         } catch (error) {
           continue;
@@ -827,20 +897,61 @@ async function checkAvailability() {
       
       if (!dayClicked) {
         console.log(`⚠️  Could not click day ${day}, trying alternative approach...`);
-        // Try clicking any button with just the day number
+        // Try clicking any button with just the day number in calendar
         try {
-          const allDayButtons = await page.locator('button, [role="gridcell"], [role="button"]').all();
+          const allDayButtons = await targetPage.locator('button, [role="gridcell"], [role="button"]').all();
           for (const btn of allDayButtons) {
-            const text = await btn.textContent();
-            if (text && text.trim() === day.toString()) {
+            const text = await btn.textContent() || '';
+            const ariaLabel = await btn.getAttribute('aria-label') || '';
+            // Match day number and check for month context
+            if ((text.trim() === day.toString() || ariaLabel.includes(`${day} ${monthNameShort}`) || ariaLabel.includes(`${day} ${monthName}`)) && 
+                !ariaLabel.includes('next') && !ariaLabel.includes('previous')) {
               await btn.click();
-              console.log(`✅ Clicked day ${day} via text match`);
-              await page.waitForTimeout(2000);
+              console.log(`✅ Clicked day ${day} via text/aria-label match`);
+              await page.waitForTimeout(3000);
+              dayClicked = true;
               break;
             }
           }
         } catch (error) {
           console.log(`⚠️  Could not select date automatically`);
+        }
+      }
+      
+      // Check for "no availability" message after date selection
+      if (dayClicked) {
+        await page.waitForTimeout(2000);
+        console.log('🔍 Checking for availability status...');
+        const noAvailabilitySelectors = [
+          ':has-text("no availability")',
+          ':has-text("Unfortunately there is no availability")',
+          ':has-text("no availability at the selected time")',
+          '[class*="no-availability"]',
+          '[class*="unavailable"]'
+        ];
+        
+        let hasNoAvailability = false;
+        for (const selector of noAvailabilitySelectors) {
+          try {
+            const element = await targetPage.locator(selector).first();
+            if (await element.isVisible({ timeout: 2000 })) {
+              const text = await element.textContent();
+              if (text && !text.toLowerCase().includes('other dates')) {
+                hasNoAvailability = true;
+                console.log('❌ No availability message found for selected date');
+                break;
+              }
+            }
+          } catch (error) {
+            continue;
+          }
+        }
+        
+        if (hasNoAvailability) {
+          console.log('⚠️  Skipping time extraction - no availability for selected date');
+          // Still monitor network but mark that we expect no times
+        } else {
+          console.log('✅ Availability check passed');
         }
       }
     }
@@ -877,8 +988,11 @@ async function checkAvailability() {
                 const json = await response.json().catch(() => null);
                 if (json) {
                   jsonResponses.push({ url, data: json });
-                  const times = extractTimes(json);
-                  times.forEach(time => allExtractedTimes.add(time));
+                  // Only extract times if this response is for the selected date
+                  if (hasTimesForDate(json, DATE)) {
+                    const times = extractTimes(json);
+                    times.forEach(time => allExtractedTimes.add(time));
+                  }
                 }
               }
             } catch (error) {
@@ -915,8 +1029,13 @@ async function checkAvailability() {
     
     console.log(`\n🎯 Times in window (${WINDOW_START} - ${WINDOW_END}): ${timesInWindow.length > 0 ? timesInWindow.join(', ') : 'none'}`);
     
+    // Verify we have responses for the selected date
+    const responsesForDate = jsonResponses.filter(r => hasTimesForDate(r.data, DATE));
+    console.log(`📅 JSON responses for selected date (${DATE}): ${responsesForDate.length}`);
+    
     // Process times in window and send notifications
-    if (timesInWindow.length > 0) {
+    // Only send notifications if we have date-specific responses
+    if (timesInWindow.length > 0 && responsesForDate.length > 0) {
       for (const time of timesInWindow) {
         const timeKey = `${DATE}_${time}`;
         
