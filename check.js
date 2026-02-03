@@ -1023,53 +1023,59 @@ async function checkAvailability() {
       }
     }
     
-    // Wait for SevenRooms iframe to load (if present)
+    // Wait for SevenRooms iframe to load (if present) - reuse existing iframe variable
     console.log('⏳ Waiting for SevenRooms iframe to load...');
     
-    let iframe = null;
-    try {
-      const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
-        timeout: 10000
-      });
-      if (iframeElement) {
-        iframe = await iframeElement.contentFrame();
-        console.log('✅ Found SevenRooms iframe');
+    // If we haven't found the iframe yet, try to find it now for network monitoring
+    if (!iframe) {
+      try {
+        const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
+          timeout: 10000
+        });
+        if (iframeElement) {
+          iframe = await iframeElement.contentFrame();
+          console.log('✅ Found SevenRooms iframe for network monitoring');
+        }
+      } catch (error) {
+        console.log('⚠️  SevenRooms iframe not found for network monitoring, using main page only...');
+      }
+    } else {
+      console.log('✅ Using existing iframe for network monitoring');
+    }
+    
+    // Monitor iframe network traffic if we have an iframe
+    if (iframe) {
+      iframe.on('response', async (response) => {
+        const url = response.url();
+        const urlLower = url.toLowerCase();
         
-        // Monitor iframe network traffic
-        iframe.on('response', async (response) => {
-          const url = response.url();
-          const urlLower = url.toLowerCase();
+        // Check if URL matches our patterns
+        const urlPatterns = ['sevenrooms', 'availability', 'reservation', 'search', 'slot', 'booking', 'inventory'];
+        const matchesPattern = urlPatterns.some(pattern => urlLower.includes(pattern));
+        
+        if (matchesPattern && relevantUrls.length < 50) {
+          relevantUrls.push(url);
+          console.log(`📡 [${relevantUrls.length}/50] ${url}`);
           
-          // Check if URL matches our patterns
-          const urlPatterns = ['sevenrooms', 'availability', 'reservation', 'search', 'slot', 'booking', 'inventory'];
-          const matchesPattern = urlPatterns.some(pattern => urlLower.includes(pattern));
-          
-          if (matchesPattern && relevantUrls.length < 50) {
-            relevantUrls.push(url);
-            console.log(`📡 [${relevantUrls.length}/50] ${url}`);
-            
-            // Try to parse as JSON
-            try {
-              const contentType = response.headers()['content-type'] || '';
-              if (contentType.includes('json') || urlLower.includes('.json')) {
-                const json = await response.json().catch(() => null);
-                if (json) {
-                  jsonResponses.push({ url, data: json });
-                  // Only extract times if this response is for the selected date
-                  if (hasTimesForDate(json, DATE)) {
-                    const times = extractTimes(json);
-                    times.forEach(time => allExtractedTimes.add(time));
-                  }
+          // Try to parse as JSON
+          try {
+            const contentType = response.headers()['content-type'] || '';
+            if (contentType.includes('json') || urlLower.includes('.json')) {
+              const json = await response.json().catch(() => null);
+              if (json) {
+                jsonResponses.push({ url, data: json });
+                // Only extract times if this response is for the selected date
+                if (hasTimesForDate(json, DATE)) {
+                  const times = extractTimes(json);
+                  times.forEach(time => allExtractedTimes.add(time));
                 }
               }
-            } catch (error) {
-              // Not JSON or parsing failed, ignore
             }
+          } catch (error) {
+            // Not JSON or parsing failed, ignore
           }
-        });
-      }
-    } catch (error) {
-      console.log('⚠️  SevenRooms iframe not found, monitoring main page traffic only...');
+        }
+      });
     }
     
     // Monitor for up to 20 seconds
