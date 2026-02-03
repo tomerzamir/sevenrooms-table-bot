@@ -572,6 +572,68 @@ async function selectPartySize(page, partySize) {
   }
 }
 
+// Extract times recursively from data structure
+function extractTimes(data, times = new Set(), visited = new WeakSet()) {
+  if (data === null || data === undefined) return times;
+  
+  // Avoid circular references (only for objects)
+  if (typeof data === 'object' && data !== null) {
+    if (visited.has(data)) return times;
+    visited.add(data);
+  }
+  
+  // Handle arrays
+  if (Array.isArray(data)) {
+    data.forEach(item => extractTimes(item, times, visited));
+    return times;
+  }
+  
+  // Handle objects
+  if (typeof data === 'object') {
+    // Check common time-related keys
+    const timeKeys = ['time', 'times', 'slots', 'available_times', 'start_time', 'startTime', 'slot', 'availability', 'reservationTime'];
+    
+    for (const [key, value] of Object.entries(data)) {
+      const lowerKey = key.toLowerCase();
+      
+      // If key suggests time data, process it
+      if (timeKeys.some(tk => lowerKey.includes(tk.toLowerCase()))) {
+        extractTimes(value, times, visited);
+      }
+      
+      // Recursively process all values
+      extractTimes(value, times, visited);
+    }
+    
+    return times;
+  }
+  
+  // Handle strings
+  if (typeof data === 'string') {
+    // Match HH:MM format
+    const timeMatch = data.match(/\b(\d{1,2}):(\d{2})\b/);
+    if (timeMatch) {
+      const hours = parseInt(timeMatch[1], 10);
+      const minutes = parseInt(timeMatch[2], 10);
+      if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
+        const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+        times.add(formattedTime);
+      }
+    }
+    
+    // Match ISO datetime strings
+    const isoMatch = data.match(/\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):/);
+    if (isoMatch) {
+      const hours = parseInt(isoMatch[1], 10);
+      const minutes = parseInt(isoMatch[2], 10);
+      const formattedTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+      times.add(formattedTime);
+    }
+  }
+  
+  return times;
+}
+
 // Main checking function
 async function checkAvailability() {
   const state = loadState();
@@ -581,40 +643,32 @@ async function checkAvailability() {
   });
   const page = await context.newPage();
 
-  const seenEndpoints = [];
-  const availableTimes = [];
-  let foundReservationData = false;
+  const relevantUrls = [];
+  const jsonResponses = [];
+  const allExtractedTimes = new Set();
 
-  // Intercept network responses
+  // Monitor network responses from main page
   page.on('response', async (response) => {
     const url = response.url();
-    const contentType = response.headers()['content-type'] || '';
+    const urlLower = url.toLowerCase();
     
-    // Log interesting endpoints
-    if (url.includes('sevenrooms') || url.includes('api') || contentType.includes('json')) {
-      seenEndpoints.push(url);
+    // Check if URL matches our patterns
+    const urlPatterns = ['sevenrooms', 'availability', 'reservation', 'search', 'slot', 'booking', 'inventory'];
+    const matchesPattern = urlPatterns.some(pattern => urlLower.includes(pattern));
+    
+    if (matchesPattern && relevantUrls.length < 50) {
+      relevantUrls.push(url);
+      console.log(`📡 [${relevantUrls.length}/50] ${url}`);
       
+      // Try to parse as JSON
       try {
-        const json = await response.json().catch(() => null);
-        if (json) {
-          // Look for reservation/availability data
-          // SevenRooms typically returns data in structures like:
-          // - availability, slots, times, reservations, etc.
-          const jsonStr = JSON.stringify(json).toLowerCase();
-          
-          if (jsonStr.includes('time') && (jsonStr.includes('available') || jsonStr.includes('slot') || jsonStr.includes('reservation'))) {
-            foundReservationData = true;
-            console.log(`📡 Found potential reservation data from: ${url}`);
-            
-            // Try to extract times from various possible structures
-            // Filter to only include times for the selected date
-            const times = extractTimesFromJson(json, DATE);
-            if (times.length > 0) {
-              console.log(`   Found ${times.length} time slots for selected date`);
-              availableTimes.push(...times);
-            } else {
-              console.log(`   Found reservation data but no times match selected date ${DATE}`);
-            }
+        const contentType = response.headers()['content-type'] || '';
+        if (contentType.includes('json') || urlLower.includes('.json')) {
+          const json = await response.json().catch(() => null);
+          if (json) {
+            jsonResponses.push({ url, data: json });
+            const times = extractTimes(json);
+            times.forEach(time => allExtractedTimes.add(time));
           }
         }
       } catch (error) {
@@ -639,150 +693,97 @@ async function checkAvailability() {
     
     console.log('✅ Page loaded');
     
-    // Click "Book a table" button
-    console.log('🔘 Looking for "Book a table" button...');
-    const bookButtonSelectors = [
-      'button:has-text("Book a table")',
-      'a:has-text("Book a table")',
-      '[data-testid*="book"]',
-      '[class*="book"]',
-      'button[aria-label*="book"]',
-      'a[href*="book"]',
-      'button:has-text("Reserve")',
-      'a:has-text("Reserve")',
-      'button:has-text("Book")',
-      'a:has-text("Book")'
-    ];
+    // Wait for SevenRooms iframe to load
+    console.log('⏳ Waiting for SevenRooms iframe to load...');
     
-    let bookButtonClicked = false;
-    for (const selector of bookButtonSelectors) {
-      try {
-        const button = await page.locator(selector).first();
-        if (await button.isVisible({ timeout: 3000 })) {
-          console.log(`   Found button with selector: ${selector}`);
-          await button.click();
-          bookButtonClicked = true;
-          console.log('✅ Clicked "Book a table" button');
-          await page.waitForTimeout(2000); // Wait for modal/widget to appear
-          break;
-        }
-      } catch (error) {
-        // Try next selector
-        continue;
-      }
-    }
-    
-    if (!bookButtonClicked) {
-      console.log('⚠️  Could not find "Book a table" button, trying to continue...');
-    }
-    
-    // Wait for SevenRooms widget/iframe to load
-    console.log('⏳ Waiting for SevenRooms widget to load...');
-    
-    // Try to find SevenRooms iframe
     let iframe = null;
     try {
       const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
-        timeout: 10000
+        timeout: 15000
       });
       if (iframeElement) {
         iframe = await iframeElement.contentFrame();
         console.log('✅ Found SevenRooms iframe');
+        
+        // Monitor iframe network traffic
+        iframe.on('response', async (response) => {
+          const url = response.url();
+          const urlLower = url.toLowerCase();
+          
+          // Check if URL matches our patterns
+          const urlPatterns = ['sevenrooms', 'availability', 'reservation', 'search', 'slot', 'booking', 'inventory'];
+          const matchesPattern = urlPatterns.some(pattern => urlLower.includes(pattern));
+          
+          if (matchesPattern && relevantUrls.length < 50) {
+            relevantUrls.push(url);
+            console.log(`📡 [${relevantUrls.length}/50] ${url}`);
+            
+            // Try to parse as JSON
+            try {
+              const contentType = response.headers()['content-type'] || '';
+              if (contentType.includes('json') || urlLower.includes('.json')) {
+                const json = await response.json().catch(() => null);
+                if (json) {
+                  jsonResponses.push({ url, data: json });
+                  const times = extractTimes(json);
+                  times.forEach(time => allExtractedTimes.add(time));
+                }
+              }
+            } catch (error) {
+              // Not JSON or parsing failed, ignore
+            }
+          }
+        });
       }
     } catch (error) {
-      console.log('⚠️  SevenRooms iframe not found, using main page...');
+      console.log('⚠️  SevenRooms iframe not found, monitoring main page traffic only...');
     }
     
-    // Use iframe context if available, otherwise use main page
-    const contextPage = iframe || page;
+    // Monitor for up to 20 seconds
+    console.log('\n🔍 Monitoring network traffic for up to 20 seconds...');
+    const startTime = Date.now();
+    const monitorDuration = 20000; // 20 seconds
     
-    // Select the date
-    console.log(`📅 Selecting date: ${DATE}`);
-    await selectDate(contextPage, DATE);
-    
-    // Select party size
-    console.log(`👥 Selecting party size: ${PARTY_SIZE}`);
-    await selectPartySize(contextPage, PARTY_SIZE);
-    
-    // Wait a bit more for any async API calls after date and party size selection
-    await page.waitForTimeout(3000);
-    
-    // Check for "no availability" message for the selected date
-    console.log('🔍 Checking for availability status...');
-    const hasNoAvailability = await checkNoAvailability(contextPage);
-    
-    if (hasNoAvailability) {
-      console.log('❌ No availability found for selected date');
-      console.log('   Skipping time extraction to avoid false positives');
-      // Still check network responses in case they contain date-specific data
-    } else {
-      console.log('✅ Availability check passed (or message not found)');
+    while (Date.now() - startTime < monitorDuration && relevantUrls.length < 50) {
+      await page.waitForTimeout(1000);
     }
     
-    console.log(`\n📊 Network activity summary:`);
-    console.log(`   Total endpoints checked: ${seenEndpoints.length}`);
-    if (seenEndpoints.length > 0) {
-      console.log(`   Sample endpoints:`);
-      seenEndpoints.slice(0, 5).forEach(url => {
-        console.log(`     - ${url.substring(0, 80)}...`);
-      });
-    }
+    console.log(`\n📊 Network monitoring complete:`);
+    console.log(`   Total relevant URLs found: ${relevantUrls.length}`);
+    console.log(`   JSON responses collected: ${jsonResponses.length}`);
     
-    if (!foundReservationData) {
-      console.log('⚠️  No reservation data found in network responses');
-      console.log('   This might mean:');
-      console.log('   - The page structure has changed');
-      console.log('   - The API endpoints are different');
-      console.log('   - The widget loads differently');
-    }
+    // Extract all times
+    const extractedTimesArray = Array.from(allExtractedTimes).sort();
+    console.log(`\n⏰ Extracted times: ${extractedTimesArray.length > 0 ? extractedTimesArray.join(', ') : 'none'}`);
     
-    // If we didn't find times via network interception, try DOM parsing
-    // Only if we didn't detect a "no availability" message
-    if (availableTimes.length === 0 && !hasNoAvailability) {
-      console.log('\n🔍 Attempting to extract times from DOM...');
-      const domTimes = await extractTimesFromDOM(contextPage, DATE);
-      if (domTimes.length > 0) {
-        availableTimes.push(...domTimes);
-        console.log(`   Found ${domTimes.length} times in DOM`);
-      }
-    } else if (hasNoAvailability) {
-      console.log('\n⏭️  Skipping DOM extraction due to no availability message');
-    }
+    // Filter times in window
+    const timesInWindow = extractedTimesArray.filter(time => {
+      return isTimeInWindow(time, WINDOW_START, WINDOW_END);
+    });
     
-    // Process available times
-    if (availableTimes.length > 0) {
-      console.log(`\n📅 Found ${availableTimes.length} available time slots:`);
-      const uniqueTimes = [...new Set(availableTimes)];
-      
-      for (const time of uniqueTimes) {
-        const formattedTime = formatTime(time);
-        if (!formattedTime) {
-          console.log(`   ⚠️  Could not parse time: ${time}`);
-          continue;
-        }
+    console.log(`\n🎯 Times in window (${WINDOW_START} - ${WINDOW_END}): ${timesInWindow.length > 0 ? timesInWindow.join(', ') : 'none'}`);
+    
+    // Process times in window and send notifications
+    if (timesInWindow.length > 0) {
+      for (const time of timesInWindow) {
+        const timeKey = `${DATE}_${time}`;
         
-        console.log(`   - ${formattedTime}`);
-        
-        // Check if time is in window
-        if (isTimeInWindow(formattedTime, WINDOW_START, WINDOW_END)) {
-          const timeKey = `${DATE}_${formattedTime}`;
+        // Check if we've already notified for this time
+        if (!state.notifiedTimes.includes(timeKey)) {
+          console.log(`\n🔔 ${time} is in window and not yet notified! Sending notification...`);
+          const sent = await sendNotification(time);
           
-          // Check if we've already notified for this time
-          if (!state.notifiedTimes.includes(timeKey)) {
-            console.log(`   ✅ ${formattedTime} is in window! Sending notification...`);
-            const sent = await sendNotification(formattedTime);
-            
-            if (sent) {
-              state.notifiedTimes.push(timeKey);
-              saveState(state);
-            }
-          } else {
-            console.log(`   ℹ️  Already notified for ${formattedTime}, skipping`);
+          if (sent) {
+            state.notifiedTimes.push(timeKey);
+            saveState(state);
+            console.log(`✅ Notification sent for ${time}`);
           }
+        } else {
+          console.log(`ℹ️  Already notified for ${time}, skipping`);
         }
       }
     } else {
-      console.log('\n❌ No available times found');
+      console.log('\n❌ No times found in the specified window');
     }
     
   } catch (error) {
