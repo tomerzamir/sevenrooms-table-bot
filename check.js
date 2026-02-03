@@ -132,6 +132,269 @@ async function sendNotification(time) {
   }
 }
 
+// Select date in the booking widget
+async function selectDate(page, targetDate) {
+  try {
+    // Parse the target date (format: YYYY-MM-DD)
+    const [year, month, day] = targetDate.split('-').map(Number);
+    const targetDateObj = new Date(year, month - 1, day);
+    
+    // Try various date picker selectors
+    const dateInputSelectors = [
+      'input[type="date"]',
+      'input[placeholder*="date" i]',
+      'input[name*="date" i]',
+      '[data-testid*="date"]',
+      '[class*="date-picker"]',
+      '[class*="calendar"]',
+      'button[aria-label*="date" i]'
+    ];
+    
+    let dateSelected = false;
+    
+    // First, try to find a date input and set it directly
+    for (const selector of dateInputSelectors) {
+      try {
+        const dateInput = await page.locator(selector).first();
+        if (await dateInput.isVisible({ timeout: 2000 })) {
+          console.log(`   Found date input with selector: ${selector}`);
+          // Try to set the date directly if it's an input
+          const tagName = await dateInput.evaluate(el => el.tagName.toLowerCase());
+          if (tagName === 'input') {
+            await dateInput.fill(targetDate);
+            await dateInput.press('Enter');
+            dateSelected = true;
+            console.log(`✅ Set date input to ${targetDate}`);
+            await page.waitForTimeout(1000);
+            break;
+          }
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    // If direct input didn't work, try clicking on calendar dates
+    if (!dateSelected) {
+      console.log('   Trying calendar date selection...');
+      
+      // Look for calendar/date picker elements
+      const calendarSelectors = [
+        '[role="gridcell"]',
+        '[class*="calendar-day"]',
+        '[class*="date-cell"]',
+        'td[data-date]',
+        'button[data-date]',
+        '[aria-label*="day"]'
+      ];
+      
+      for (const selector of calendarSelectors) {
+        try {
+          // Get all date elements
+          const dateElements = await page.locator(selector).all();
+          
+          for (const element of dateElements) {
+            const text = await element.textContent();
+            const ariaLabel = await element.getAttribute('aria-label') || '';
+            const dataDate = await element.getAttribute('data-date') || '';
+            
+            // Check if this element matches our target date
+            const elementDate = dataDate || ariaLabel || text;
+            
+            // Try to match the day number
+            if (elementDate.includes(day.toString()) || text?.trim() === day.toString()) {
+              // Verify it's the right month/year by checking parent context
+              const parentText = await element.evaluate(el => {
+                let parent = el.parentElement;
+                let attempts = 0;
+                while (parent && attempts < 5) {
+                  const text = parent.textContent || '';
+                  if (text.includes(month.toString()) || text.includes(year.toString())) {
+                    return text;
+                  }
+                  parent = parent.parentElement;
+                  attempts++;
+                }
+                return '';
+              });
+              
+              // If we found a matching day, click it
+              if (parentText.includes(month.toString()) || parentText.includes(year.toString()) || !parentText) {
+                await element.click();
+                dateSelected = true;
+                console.log(`✅ Clicked date ${day} in calendar`);
+                await page.waitForTimeout(2000);
+                break;
+              }
+            }
+          }
+          
+          if (dateSelected) break;
+        } catch (error) {
+          continue;
+        }
+      }
+    }
+    
+    // If still not selected, try navigating calendar months
+    if (!dateSelected) {
+      console.log('   Trying to navigate calendar to target month...');
+      
+      // Try to find next/previous month buttons
+      const navSelectors = [
+        'button[aria-label*="next" i]',
+        'button[aria-label*="previous" i]',
+        'button[aria-label*="forward" i]',
+        'button[aria-label*="back" i]',
+        '[class*="next"]',
+        '[class*="prev"]'
+      ];
+      
+      // Get current month/year from calendar if visible
+      const calendarText = await page.textContent('body');
+      const currentMonth = new Date().getMonth() + 1;
+      const currentYear = new Date().getFullYear();
+      
+      // Calculate how many months to navigate
+      const monthsDiff = (year - currentYear) * 12 + (month - currentMonth);
+      
+      if (monthsDiff !== 0) {
+        const navButton = monthsDiff > 0 
+          ? await page.locator('button[aria-label*="next" i], button[aria-label*="forward" i]').first()
+          : await page.locator('button[aria-label*="previous" i], button[aria-label*="back" i]').first();
+        
+        if (await navButton.isVisible({ timeout: 2000 })) {
+          const clicks = Math.abs(monthsDiff);
+          for (let i = 0; i < clicks; i++) {
+            await navButton.click();
+            await page.waitForTimeout(500);
+          }
+          console.log(`   Navigated ${clicks} month(s)`);
+          
+          // Now try to click the day
+          const dayElements = await page.locator('[role="gridcell"], [class*="calendar-day"], button[data-date]').all();
+          for (const element of dayElements) {
+            const text = await element.textContent();
+            if (text?.trim() === day.toString()) {
+              await element.click();
+              dateSelected = true;
+              console.log(`✅ Clicked date ${day} after navigation`);
+              await page.waitForTimeout(2000);
+              break;
+            }
+          }
+          return;
+        }
+      }
+    }
+    
+    if (!dateSelected) {
+      console.log('⚠️  Could not select date automatically, continuing...');
+    }
+  } catch (error) {
+    console.log(`⚠️  Error selecting date: ${error.message}`);
+  }
+}
+
+// Select party size in the booking widget
+async function selectPartySize(page, partySize) {
+  try {
+    const partySizeNum = parseInt(partySize, 10);
+    
+    // Try various party size selectors
+    const partySelectors = [
+      `select[name*="party" i]`,
+      `select[name*="guest" i]`,
+      `select[name*="people" i]`,
+      `input[name*="party" i]`,
+      `input[name*="guest" i]`,
+      `input[name*="people" i]`,
+      `[data-testid*="party"]`,
+      `[data-testid*="guest"]`,
+      `button:has-text("${partySize}")`,
+      `[aria-label*="party" i]`,
+      `[aria-label*="guest" i]`
+    ];
+    
+    let partySizeSelected = false;
+    
+    // Try to find and set party size input/select
+    for (const selector of partySelectors) {
+      try {
+        const element = await page.locator(selector).first();
+        if (await element.isVisible({ timeout: 2000 })) {
+          console.log(`   Found party size element with selector: ${selector}`);
+          
+          const tagName = await element.evaluate(el => el.tagName.toLowerCase());
+          
+          if (tagName === 'select') {
+            await element.selectOption(partySizeNum.toString());
+            partySizeSelected = true;
+            console.log(`✅ Selected party size ${partySize} from dropdown`);
+            await page.waitForTimeout(1000);
+            break;
+          } else if (tagName === 'input') {
+            await element.fill(partySizeNum.toString());
+            await element.press('Enter');
+            partySizeSelected = true;
+            console.log(`✅ Set party size input to ${partySize}`);
+            await page.waitForTimeout(1000);
+            break;
+          } else if (tagName === 'button') {
+            await element.click();
+            partySizeSelected = true;
+            console.log(`✅ Clicked party size button for ${partySize}`);
+            await page.waitForTimeout(1000);
+            break;
+          }
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    // If not found, try increment/decrement buttons
+    if (!partySizeSelected) {
+      try {
+        const incrementButtons = await page.locator('button[aria-label*="increase" i], button[aria-label*="increment" i], button[aria-label*="+" i]').all();
+        const decrementButtons = await page.locator('button[aria-label*="decrease" i], button[aria-label*="decrement" i], button[aria-label*="-" i]').all();
+        
+        if (incrementButtons.length > 0 || decrementButtons.length > 0) {
+          // Try to find current party size value
+          const currentValueElement = await page.locator('input[type="number"], [class*="party"], [class*="guest"]').first();
+          if (await currentValueElement.isVisible({ timeout: 2000 })) {
+            const currentValue = parseInt(await currentValueElement.inputValue() || await currentValueElement.textContent() || '1', 10);
+            const diff = partySizeNum - currentValue;
+            
+            if (diff !== 0) {
+              const buttons = diff > 0 ? incrementButtons : decrementButtons;
+              if (buttons.length > 0) {
+                for (let i = 0; i < Math.abs(diff); i++) {
+                  await buttons[0].click();
+                  await page.waitForTimeout(300);
+                }
+                partySizeSelected = true;
+                console.log(`✅ Adjusted party size to ${partySize} using buttons`);
+              }
+            } else {
+              partySizeSelected = true;
+              console.log(`✅ Party size already set to ${partySize}`);
+            }
+          }
+        }
+      } catch (error) {
+        // Ignore errors
+      }
+    }
+    
+    if (!partySizeSelected) {
+      console.log('⚠️  Could not select party size automatically, continuing...');
+    }
+  } catch (error) {
+    console.log(`⚠️  Error selecting party size: ${error.message}`);
+  }
+}
+
 // Main checking function
 async function checkAvailability() {
   const state = loadState();
@@ -196,22 +459,73 @@ async function checkAvailability() {
     
     console.log('✅ Page loaded');
     
+    // Click "Book a table" button
+    console.log('🔘 Looking for "Book a table" button...');
+    const bookButtonSelectors = [
+      'button:has-text("Book a table")',
+      'a:has-text("Book a table")',
+      '[data-testid*="book"]',
+      '[class*="book"]',
+      'button[aria-label*="book"]',
+      'a[href*="book"]',
+      'button:has-text("Reserve")',
+      'a:has-text("Reserve")',
+      'button:has-text("Book")',
+      'a:has-text("Book")'
+    ];
+    
+    let bookButtonClicked = false;
+    for (const selector of bookButtonSelectors) {
+      try {
+        const button = await page.locator(selector).first();
+        if (await button.isVisible({ timeout: 3000 })) {
+          console.log(`   Found button with selector: ${selector}`);
+          await button.click();
+          bookButtonClicked = true;
+          console.log('✅ Clicked "Book a table" button');
+          await page.waitForTimeout(2000); // Wait for modal/widget to appear
+          break;
+        }
+      } catch (error) {
+        // Try next selector
+        continue;
+      }
+    }
+    
+    if (!bookButtonClicked) {
+      console.log('⚠️  Could not find "Book a table" button, trying to continue...');
+    }
+    
     // Wait for SevenRooms widget/iframe to load
     console.log('⏳ Waiting for SevenRooms widget to load...');
     
-    // Try to find SevenRooms iframe or widget
+    // Try to find SevenRooms iframe
+    let iframe = null;
     try {
-      await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], [data-sevenrooms], [id*="sevenrooms"]', {
-        timeout: 15000
-      }).catch(() => {
-        console.log('⚠️  SevenRooms iframe selector not found, continuing...');
+      const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
+        timeout: 10000
       });
+      if (iframeElement) {
+        iframe = await iframeElement.contentFrame();
+        console.log('✅ Found SevenRooms iframe');
+      }
     } catch (error) {
-      console.log('⚠️  Could not find SevenRooms iframe, but continuing...');
+      console.log('⚠️  SevenRooms iframe not found, using main page...');
     }
     
-    // Wait a bit more for any async API calls
-    await page.waitForTimeout(5000);
+    // Use iframe context if available, otherwise use main page
+    const contextPage = iframe || page;
+    
+    // Select the date
+    console.log(`📅 Selecting date: ${DATE}`);
+    await selectDate(contextPage, DATE);
+    
+    // Select party size
+    console.log(`👥 Selecting party size: ${PARTY_SIZE}`);
+    await selectPartySize(contextPage, PARTY_SIZE);
+    
+    // Wait a bit more for any async API calls after date and party size selection
+    await page.waitForTimeout(3000);
     
     console.log(`\n📊 Network activity summary:`);
     console.log(`   Total endpoints checked: ${seenEndpoints.length}`);
@@ -233,7 +547,7 @@ async function checkAvailability() {
     // If we didn't find times via network interception, try DOM parsing
     if (availableTimes.length === 0) {
       console.log('\n🔍 Attempting to extract times from DOM...');
-      const domTimes = await extractTimesFromDOM(page);
+      const domTimes = await extractTimesFromDOM(contextPage);
       if (domTimes.length > 0) {
         availableTimes.push(...domTimes);
         console.log(`   Found ${domTimes.length} times in DOM`);
