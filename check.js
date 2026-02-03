@@ -767,17 +767,42 @@ async function checkAvailability() {
     
     // Wait for booking page/widget to fully load
     console.log('⏳ Waiting for booking page to load...');
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(3000);
     
-    // Wait for the date button to appear
-    console.log('⏳ Waiting for date button to appear...');
+    // Wait for SevenRooms iframe to load - this is critical!
+    console.log('⏳ Waiting for SevenRooms iframe to load...');
+    let iframe = null;
+    let targetPage = page;
+    
     try {
-      await page.waitForSelector('[data-test="sr-reservation-date"], button[aria-label*="Date"], button[aria-label*="date" i]', {
-        timeout: 10000
+      const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"], iframe[title*="Reservation"]', {
+        timeout: 15000
       });
-      console.log('✅ Date button element found');
+      if (iframeElement) {
+        iframe = await iframeElement.contentFrame();
+        if (iframe) {
+          console.log('✅ Found SevenRooms iframe');
+          targetPage = iframe;
+          
+          // Wait for iframe content to be ready
+          console.log('⏳ Waiting for iframe content to be ready...');
+          await iframe.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+          await page.waitForTimeout(3000);
+          
+          // Wait for the date button to appear INSIDE the iframe
+          console.log('⏳ Waiting for date button inside iframe...');
+          try {
+            await iframe.waitForSelector('[data-test="sr-reservation-date"], button[aria-label*="Date"], button[aria-label*="date" i]', {
+              timeout: 10000
+            });
+            console.log('✅ Date button found inside iframe!');
+          } catch (error) {
+            console.log('⚠️  Date button not found in iframe yet, will try anyway...');
+          }
+        }
+      }
     } catch (error) {
-      console.log('⚠️  Date button not found yet, continuing...');
+      console.log('⚠️  SevenRooms iframe not found, will try main page...');
     }
     
     // Click the date button to open calendar
@@ -787,7 +812,7 @@ async function checkAvailability() {
     const monthName = monthNames[month - 1];
     const monthNameShort = monthName.substring(0, 3); // "Feb"
     
-    // Try to find and click the date button - try both main page and iframe
+    // Try to find and click the date button
     const dateButtonSelectors = [
       '[data-test="sr-reservation-date"]',
       'button[data-test="sr-reservation-date"]',
@@ -800,24 +825,9 @@ async function checkAvailability() {
     ];
     
     let dateButtonClicked = false;
-    let targetPage = page; // Store which page we'll use
     
-    // Try main page first, then iframe
-    const pagesToTry = [page];
-    try {
-      const iframeElement = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="widget"], iframe[src*="booking"]', {
-        timeout: 3000
-      });
-      if (iframeElement) {
-        const iframe = await iframeElement.contentFrame();
-        if (iframe) {
-          pagesToTry.push(iframe);
-          console.log('   Will also check iframe for date button');
-        }
-      }
-    } catch (error) {
-      // Continue with main page only
-    }
+    // Try the target page (iframe if found, otherwise main page)
+    const pagesToTry = targetPage === iframe ? [iframe, page] : [page];
     
     for (const testPage of pagesToTry) {
       const pageName = testPage === page ? 'main page' : 'iframe';
@@ -826,9 +836,11 @@ async function checkAvailability() {
       for (const selector of dateButtonSelectors) {
         try {
           const dateButton = await testPage.locator(selector).first();
-          if (await dateButton.isVisible({ timeout: 2000 })) {
+          if (await dateButton.isVisible({ timeout: 3000 })) {
             const ariaLabel = await dateButton.getAttribute('aria-label') || '';
-            console.log(`   ✅ Found date button on ${pageName} with selector: ${selector} (aria-label: ${ariaLabel})`);
+            const text = await dateButton.textContent() || '';
+            console.log(`   ✅ Found date button on ${pageName} with selector: ${selector}`);
+            console.log(`      aria-label: "${ariaLabel}", text: "${text}"`);
             await dateButton.click();
             dateButtonClicked = true;
             targetPage = testPage; // Remember which page we used
@@ -848,24 +860,28 @@ async function checkAvailability() {
         const allButtons = await testPage.locator('button').all();
         console.log(`   Checking ${allButtons.length} buttons on ${pageName}...`);
         for (const btn of allButtons) {
-          const ariaLabel = await btn.getAttribute('aria-label') || '';
-          const text = await btn.textContent() || '';
-          const dataTest = await btn.getAttribute('data-test') || '';
-          
-          if (dataTest.includes('date') || 
-              ariaLabel.toLowerCase().includes('date') || 
-              (text && (text.toLowerCase().includes('date') || text.match(/\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i)))) {
-            console.log(`   Found potential date button: aria-label="${ariaLabel}", text="${text}", data-test="${dataTest}"`);
-            await btn.click();
-            dateButtonClicked = true;
-            targetPage = testPage; // Remember which page we used
-            console.log(`✅ Clicked date button on ${pageName} via alternative match`);
-            await page.waitForTimeout(2000);
-            break;
+          try {
+            const ariaLabel = await btn.getAttribute('aria-label') || '';
+            const text = await btn.textContent() || '';
+            const dataTest = await btn.getAttribute('data-test') || '';
+            
+            if (dataTest.includes('date') || 
+                ariaLabel.toLowerCase().includes('date') || 
+                (text && (text.toLowerCase().includes('date') || text.match(/\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i)))) {
+              console.log(`   Found potential date button: aria-label="${ariaLabel}", text="${text}", data-test="${dataTest}"`);
+              await btn.click();
+              dateButtonClicked = true;
+              targetPage = testPage; // Remember which page we used
+              console.log(`✅ Clicked date button on ${pageName} via alternative match`);
+              await page.waitForTimeout(2000);
+              break;
+            }
+          } catch (error) {
+            continue;
           }
         }
       } catch (error) {
-        // Continue to next page
+        console.log(`   Error checking buttons on ${pageName}: ${error.message}`);
       }
       
       if (dateButtonClicked) break;
