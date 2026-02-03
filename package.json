@@ -1,0 +1,21 @@
+{
+  "name": "sevenrooms-table-bot",
+  "version": "1.0.0",
+  "description": "Monitor SevenRooms booking page for available reservations",
+  "main": "check.js",
+  "scripts": {
+    "check": "node check.js"
+  },
+  "keywords": [
+    "sevenrooms",
+    "booking",
+    "monitor",
+    "pushover"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.40.0",
+    "node-fetch": "^2.7.0"
+  }
+}
