@@ -767,65 +767,156 @@ async function checkAvailability() {
 
     // We stay on gloria-osteria.com - widget loads in iframe on same page
     const widgetPage = page;
-    console.log('⏳ Waiting for SevenRooms iframe...');
-    await widgetPage.waitForTimeout(3000);
+    console.log('⏳ Waiting for SevenRooms iframe to appear...');
+    
+    // Wait for iframe element to exist first
+    let iframeElement = null;
+    try {
+      iframeElement = await widgetPage.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="gloriadublin"], iframe[src*="reservations"]', {
+        timeout: 20000
+      });
+      console.log('✅ Iframe element found');
+    } catch (e) {
+      console.log('⚠️  Iframe element not found:', e.message);
+    }
+
+    if (!iframeElement) {
+      console.log('⚠️  Trying alternative iframe selectors...');
+      try {
+        iframeElement = await widgetPage.waitForSelector('iframe', { timeout: 10000 });
+        const src = await iframeElement.getAttribute('src');
+        console.log(`   Found iframe with src: ${src?.substring(0, 80)}`);
+      } catch (e) {
+        console.log('❌ No iframe found at all');
+      }
+    }
+
+    // Wait for iframe content to load
+    await widgetPage.waitForTimeout(8000); // Give React app time to render
 
     let iframe = null;
-    let targetPage = widgetPage; // for calendar/day clicks later
-
-    // Use frameLocator to target elements INSIDE the iframe (Playwright's recommended way)
+    let targetPage = widgetPage;
     let dateButtonClicked = false;
     const [year, month, day] = DATE.split('-').map(Number);
     const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     const monthName = monthNames[month - 1];
     const monthNameShort = monthName.substring(0, 3);
 
+    if (iframeElement) {
+      try {
+        iframe = await iframeElement.contentFrame();
+        if (iframe) {
+          console.log('✅ Got iframe content frame');
+          targetPage = iframe;
+          // Wait for iframe to be ready
+          await iframe.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+          await widgetPage.waitForTimeout(5000);
+        }
+      } catch (e) {
+        console.log('⚠️  Could not get iframe content frame:', e.message);
+      }
+    }
+
+    // Try frameLocator approach
     const iframeSelectors = [
       'iframe[src*="sevenrooms"]',
       'iframe[src*="gloriadublin"]',
       'iframe[src*="reservations"]',
       'iframe[title*="Reservation"]',
-      'iframe[src*="widget"]'
+      'iframe[src*="widget"]',
+      'iframe'
     ];
 
     for (const iframeSel of iframeSelectors) {
       try {
+        console.log(`   Trying iframe selector: ${iframeSel}`);
         const frameLoc = page.frameLocator(iframeSel).first();
-        // Date button: data-test="sr-reservation-date" (from your inspection)
         const dateBtn = frameLoc.locator('[data-test="sr-reservation-date"]').first();
-        await dateBtn.waitFor({ state: 'visible', timeout: 10000 });
+        
+        // Try 'attached' first (element exists in DOM), then 'visible'
+        try {
+          await dateBtn.waitFor({ state: 'attached', timeout: 5000 });
+          console.log('   Date button exists in DOM');
+        } catch (e) {}
+        
+        await dateBtn.waitFor({ state: 'visible', timeout: 20000 });
         console.log('✅ Found date button inside iframe via frameLocator');
+        
+        const ariaLabel = await dateBtn.getAttribute('aria-label').catch(() => '');
+        console.log(`   Button aria-label: "${ariaLabel}"`);
+        
         await dateBtn.click();
         dateButtonClicked = true;
-        const iframeEl = await page.locator(iframeSel).first().elementHandle();
-        if (iframeEl) {
-          iframe = await iframeEl.contentFrame();
-          targetPage = iframe;
+        
+        // Get iframe reference for later
+        if (!iframe) {
+          const iframeEl = await page.locator(iframeSel).first().elementHandle();
+          if (iframeEl) {
+            iframe = await iframeEl.contentFrame();
+            targetPage = iframe;
+          }
         }
+        
         console.log('✅ Clicked date button');
         await page.waitForTimeout(2000);
         break;
       } catch (e) {
+        console.log(`   Failed with ${iframeSel}: ${e.message}`);
         continue;
       }
     }
 
-    if (!dateButtonClicked) {
-      // Fallback: get iframe by element then use frame.locator
+    if (!dateButtonClicked && iframe) {
+      // Fallback: use iframe.locator directly
       try {
-        const iframeEl = await page.waitForSelector('iframe[src*="sevenrooms"], iframe[src*="gloriadublin"]', { timeout: 10000 });
-        iframe = await iframeEl.contentFrame();
-        if (iframe) {
-          targetPage = iframe;
-          const dateBtn = iframe.locator('[data-test="sr-reservation-date"]').first();
-          await dateBtn.waitFor({ state: 'visible', timeout: 10000 });
-          await dateBtn.click();
-          dateButtonClicked = true;
-          console.log('✅ Clicked date button (contentFrame)');
-          await page.waitForTimeout(2000);
+        console.log('   Trying direct iframe.locator approach...');
+        
+        // Debug: list all buttons in iframe
+        try {
+          const allButtons = await iframe.locator('button').all();
+          console.log(`   Found ${allButtons.length} buttons in iframe`);
+          for (let i = 0; i < Math.min(10, allButtons.length); i++) {
+            const btn = allButtons[i];
+            const dataTest = await btn.getAttribute('data-test').catch(() => '');
+            const ariaLabel = await btn.getAttribute('aria-label').catch(() => '');
+            const text = await btn.textContent().catch(() => '');
+            console.log(`     Button ${i}: data-test="${dataTest}" aria-label="${ariaLabel}" text="${text.trim().substring(0, 30)}"`);
+          }
+        } catch (e) {
+          console.log(`   Could not list buttons: ${e.message}`);
         }
+        
+        const dateBtn = iframe.locator('[data-test="sr-reservation-date"]').first();
+        await dateBtn.waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
+        await dateBtn.waitFor({ state: 'visible', timeout: 20000 });
+        await dateBtn.click();
+        dateButtonClicked = true;
+        targetPage = iframe;
+        console.log('✅ Clicked date button (direct iframe.locator)');
+        await page.waitForTimeout(2000);
       } catch (err) {
         console.log('❌ Could not find or click date button:', err.message);
+        
+        // Last resort: try to find ANY button with "date" in aria-label or data-test
+        try {
+          console.log('   Last resort: searching for any date-related button...');
+          const allButtons = await iframe.locator('button').all();
+          for (const btn of allButtons) {
+            const ariaLabel = await btn.getAttribute('aria-label').catch(() => '');
+            const dataTest = await btn.getAttribute('data-test').catch(() => '');
+            if (ariaLabel.toLowerCase().includes('date') || dataTest.includes('date')) {
+              console.log(`   Found potential date button: aria-label="${ariaLabel}" data-test="${dataTest}"`);
+              await btn.click();
+              dateButtonClicked = true;
+              targetPage = iframe;
+              console.log('✅ Clicked date button (last resort)');
+              await page.waitForTimeout(2000);
+              break;
+            }
+          }
+        } catch (e) {
+          console.log(`   Last resort failed: ${e.message}`);
+        }
       }
     }
 
