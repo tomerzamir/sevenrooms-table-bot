@@ -698,6 +698,8 @@ async function checkAvailability() {
   });
 
   try {
+    let hasNoAvailabilityForSelectedDate = false; // Set true if we see "Unfortunately there is no availability at the selected time"
+    
     console.log(`\n🌐 Loading booking page: ${BOOKING_URL}`);
     
     // Add random delay before loading (anti-bot)
@@ -1024,38 +1026,36 @@ async function checkAvailability() {
         }
       }
       
-      // Check for "no availability" message after date selection
+      // Check for "Unfortunately there is no availability at the selected time" message.
+      // If this message is visible, the SELECTED date has no slots; "Other dates with availability"
+      // is a different section, so we must skip notifications whenever this message appears.
       if (dayClicked) {
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(3000); // Wait for UI to update after date selection
         console.log('🔍 Checking for availability status...');
-        const noAvailabilitySelectors = [
-          ':has-text("no availability")',
-          ':has-text("Unfortunately there is no availability")',
-          ':has-text("no availability at the selected time")',
-          '[class*="no-availability"]',
-          '[class*="unavailable"]'
-        ];
         
-        let hasNoAvailability = false;
-        for (const selector of noAvailabilitySelectors) {
-          try {
-            const element = await targetPage.locator(selector).first();
-            if (await element.isVisible({ timeout: 2000 })) {
-              const text = await element.textContent();
-              if (text && !text.toLowerCase().includes('other dates')) {
-                hasNoAvailability = true;
-                console.log('❌ No availability message found for selected date');
-                break;
-              }
-            }
-          } catch (error) {
-            continue;
+        const noAvailabilityText = 'Unfortunately there is no availability at the selected time';
+        try {
+          // Prefer body text: if the phrase appears anywhere, selected date has no availability
+          const bodyText = await targetPage.locator('body').textContent();
+          if (bodyText && bodyText.includes(noAvailabilityText)) {
+            hasNoAvailabilityForSelectedDate = true;
+            console.log('❌ No availability at selected time - will NOT send notifications');
           }
+        } catch (e) {}
+        
+        if (!hasNoAvailabilityForSelectedDate) {
+          // Fallback: any visible element containing the phrase (works for Frame and Page)
+          try {
+            const element = targetPage.locator(`:has-text("${noAvailabilityText}")`).first();
+            if (await element.isVisible({ timeout: 2000 })) {
+              hasNoAvailabilityForSelectedDate = true;
+              console.log('❌ No availability message found in widget - will NOT send notifications');
+            }
+          } catch (e) {}
         }
         
-        if (hasNoAvailability) {
-          console.log('⚠️  Skipping time extraction - no availability for selected date');
-          // Still monitor network but mark that we expect no times
+        if (hasNoAvailabilityForSelectedDate) {
+          console.log('⚠️  Selected date has no availability - notifications will be skipped');
         } else {
           console.log('✅ Availability check passed');
         }
@@ -1145,13 +1145,14 @@ async function checkAvailability() {
     const responsesForDate = jsonResponses.filter(r => hasTimesForDate(r.data, DATE));
     console.log(`📅 JSON responses for selected date (${DATE}): ${responsesForDate.length}`);
     
-    // Process times in window and send notifications
-    // Only send notifications if we have date-specific responses
-    if (timesInWindow.length > 0 && responsesForDate.length > 0) {
+    // Do NOT send notifications if we saw "Unfortunately there is no availability at the selected time"
+    if (hasNoAvailabilityForSelectedDate) {
+      console.log('\n⏭️  Skipping notifications - no availability at selected time (avoiding false positives from "Other dates with availability")');
+    } else if (timesInWindow.length > 0 && responsesForDate.length > 0) {
+      // Process times in window and send notifications
       for (const time of timesInWindow) {
         const timeKey = `${DATE}_${time}`;
         
-        // Check if we've already notified for this time
         if (!state.notifiedTimes.includes(timeKey)) {
           console.log(`\n🔔 ${time} is in window and not yet notified! Sending notification...`);
           const sent = await sendNotification(time);
@@ -1165,8 +1166,10 @@ async function checkAvailability() {
           console.log(`ℹ️  Already notified for ${time}, skipping`);
         }
       }
-    } else {
+    } else if (timesInWindow.length === 0) {
       console.log('\n❌ No times found in the specified window');
+    } else if (responsesForDate.length === 0) {
+      console.log('\n⏭️  No date-specific responses - skipping notifications to avoid false positives');
     }
     
   } catch (error) {
