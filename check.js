@@ -693,6 +693,44 @@ async function checkAvailability() {
     
     console.log('✅ Page loaded');
     
+    // Wait for page to be fully interactive
+    await page.waitForTimeout(2000);
+    
+    // First, click "BOOK A TABLE" button to open the booking widget
+    console.log('🔘 Clicking "BOOK A TABLE" button...');
+    const bookTableSelectors = [
+      'a:has-text("BOOK A TABLE")',
+      'a:has-text("Book a table")',
+      'button:has-text("BOOK A TABLE")',
+      'button:has-text("Book a table")',
+      'a[href*="sevenrooms"]',
+      'a[href*="reservations"]',
+      '[class*="book"]',
+      'a:has-text("Book")',
+      'button:has-text("Book")'
+    ];
+    
+    let bookTableClicked = false;
+    for (const selector of bookTableSelectors) {
+      try {
+        const bookButton = await page.locator(selector).first();
+        if (await bookButton.isVisible({ timeout: 3000 })) {
+          console.log(`   Found "BOOK A TABLE" button with selector: ${selector}`);
+          await bookButton.click();
+          bookTableClicked = true;
+          console.log('✅ Clicked "BOOK A TABLE" button');
+          await page.waitForTimeout(3000); // Wait for booking widget to load
+          break;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    if (!bookTableClicked) {
+      console.log('⚠️  Could not find "BOOK A TABLE" button, trying to continue...');
+    }
+    
     // Wait for booking widget to load
     await page.waitForTimeout(2000);
     
